@@ -79,9 +79,6 @@ public class DefaultHttp2Headers
                     PlatformDependent.throwException(connectionError(
                             PROTOCOL_ERROR, "Invalid HTTP/2 pseudo-header '%s' encountered.", name));
                 }
-            } else if (HttpHeaderValidationUtil.isConnectionHeader(name, true)) {
-                PlatformDependent.throwException(connectionError(
-                        PROTOCOL_ERROR, "Illegal connection-specific header '%s' encountered.", name));
             }
         }
     };
@@ -176,13 +173,15 @@ public class DefaultHttp2Headers
 
     @Override
     protected void validateValue(ValueValidator<CharSequence> validator, CharSequence name, CharSequence value) {
-        if (nameValidator() == HTTP2_NAME_VALIDATOR) {
-            if (HttpHeaderValidationUtil.isTeNotTrailers(name, value)) {
-                PlatformDependent.throwException(connectionError(PROTOCOL_ERROR,
-                        "Illegal value specified for the 'TE' header (only 'trailers' is allowed)."));
-            }
-        }
+        // This method has a noop override for backward compatibility, see https://github.com/netty/netty/pull/12975
         super.validateValue(validator, name, value);
+        // https://datatracker.ietf.org/doc/html/rfc9113#section-8.3.1
+        // pseudo headers must not be empty
+        if (nameValidator() == HTTP2_NAME_VALIDATOR && (value == null || value.length() == 0) &&
+                hasPseudoHeaderFormat(name)) {
+            PlatformDependent.throwException(connectionError(
+                    PROTOCOL_ERROR, "HTTP/2 pseudo-header '%s' must not be empty.", name));
+        }
     }
 
     @Override

@@ -37,6 +37,7 @@ import java.net.UnknownHostException;
 import java.security.AccessController;
 import java.security.PrivilegedAction;
 import java.util.Arrays;
+import java.util.Collection;
 
 import static io.netty.util.AsciiString.indexOf;
 
@@ -69,6 +70,11 @@ public final class NetUtil {
      * The loopback {@link NetworkInterface} of the current machine
      */
     public static final NetworkInterface LOOPBACK_IF;
+
+    /**
+     * An unmodifiable Collection of all the interfaces on this machine.
+     */
+    public static final Collection<NetworkInterface> NETWORK_INTERFACES;
 
     /**
      * The SOMAXCONN value of the current machine.  If failed to get the value,  {@code 200} is used as a
@@ -124,8 +130,7 @@ public final class NetUtil {
     /**
      * {@code true} if an IPv6 address should be preferred when a host has both an IPv4 address and an IPv6 address.
      */
-    private static final boolean IPV6_ADDRESSES_PREFERRED =
-            SystemPropertyUtil.getBoolean("java.net.preferIPv6Addresses", false);
+    private static final boolean IPV6_ADDRESSES_PREFERRED;
 
     /**
      * The logger being used by this class
@@ -133,8 +138,17 @@ public final class NetUtil {
     private static final InternalLogger logger = InternalLoggerFactory.getInstance(NetUtil.class);
 
     static {
+        String prefer = SystemPropertyUtil.get("java.net.preferIPv6Addresses", "false");
+        if ("true".equalsIgnoreCase(prefer.trim())) {
+            IPV6_ADDRESSES_PREFERRED = true;
+        } else {
+            // Let's just use false in this case as only true is "forcing" ipv6.
+            IPV6_ADDRESSES_PREFERRED = false;
+        }
         logger.debug("-Djava.net.preferIPv4Stack: {}", IPV4_PREFERRED);
-        logger.debug("-Djava.net.preferIPv6Addresses: {}", IPV6_ADDRESSES_PREFERRED);
+        logger.debug("-Djava.net.preferIPv6Addresses: {}", prefer);
+
+        NETWORK_INTERFACES = NetUtilInitializations.networkInterfaces();
 
         // Create IPv4 loopback address.
         LOCALHOST4 = NetUtilInitializations.createLocalhost4();
@@ -142,7 +156,8 @@ public final class NetUtil {
         // Create IPv6 loopback address.
         LOCALHOST6 = NetUtilInitializations.createLocalhost6();
 
-        NetworkIfaceAndInetAddress loopback = NetUtilInitializations.determineLoopback(LOCALHOST4, LOCALHOST6);
+        NetworkIfaceAndInetAddress loopback =
+                NetUtilInitializations.determineLoopback(NETWORK_INTERFACES, LOCALHOST4, LOCALHOST6);
         LOOPBACK_IF = loopback.iface();
         LOCALHOST = loopback.address();
 
@@ -219,8 +234,8 @@ public final class NetUtil {
         Process process = new ProcessBuilder("sysctl", sysctlKey).start();
         try {
             // Suppress warnings about resource leaks since the buffered reader is closed below
-            InputStream is = process.getInputStream();  // lgtm[java/input-resource-leak
-            InputStreamReader isr = new InputStreamReader(is);  // lgtm[java/input-resource-leak
+            InputStream is = process.getInputStream();
+            InputStreamReader isr = new InputStreamReader(is);
             BufferedReader br = new BufferedReader(isr);
             try {
                 String line = br.readLine();

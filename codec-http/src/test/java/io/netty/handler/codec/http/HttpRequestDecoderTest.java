@@ -22,7 +22,10 @@ import io.netty.util.AsciiString;
 import io.netty.util.CharsetUtil;
 import org.junit.jupiter.api.Test;
 
+import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
+import java.util.Map;
 
 import static io.netty.handler.codec.http.HttpHeaderNames.*;
 import static io.netty.handler.codec.http.HttpHeadersTestUtils.of;
@@ -79,8 +82,21 @@ public class HttpRequestDecoderTest {
         testDecodeWholeRequestAtOnce(CONTENT_MIXED_DELIMITERS);
     }
 
+    @Test
+    public void testDecodeWholeRequestAtOnceMixedDelimitersWithIntegerOverflowOnMaxBodySize() {
+        testDecodeWholeRequestAtOnce(CONTENT_MIXED_DELIMITERS, Integer.MAX_VALUE);
+        testDecodeWholeRequestAtOnce(CONTENT_MIXED_DELIMITERS, Integer.MAX_VALUE - 1);
+    }
+
     private static void testDecodeWholeRequestAtOnce(byte[] content) {
-        EmbeddedChannel channel = new EmbeddedChannel(new HttpRequestDecoder());
+        testDecodeWholeRequestAtOnce(content, HttpRequestDecoder.DEFAULT_MAX_HEADER_SIZE);
+    }
+
+    private static void testDecodeWholeRequestAtOnce(byte[] content, int maxHeaderSize) {
+        EmbeddedChannel channel =
+                new EmbeddedChannel(new HttpRequestDecoder(HttpObjectDecoder.DEFAULT_MAX_INITIAL_LINE_LENGTH,
+                                                           maxHeaderSize,
+                                                           HttpObjectDecoder.DEFAULT_MAX_CHUNK_SIZE));
         assertTrue(channel.writeInbound(Unpooled.copiedBuffer(content)));
         HttpRequest req = channel.readInbound();
         assertNotNull(req);
@@ -304,7 +320,7 @@ public class HttpRequestDecoderTest {
         assertTrue(channel.writeInbound(Unpooled.copiedBuffer(requestStr, CharsetUtil.US_ASCII)));
         HttpRequest request = channel.readInbound();
         assertTrue(request.decoderResult().isFailure());
-        assertTrue(request.decoderResult().cause() instanceof TooLongHttpLineException);
+        assertThat(request.decoderResult().cause(), instanceOf(TooLongHttpLineException.class));
         assertFalse(channel.finish());
     }
 
@@ -541,11 +557,29 @@ public class HttpRequestDecoderTest {
         assertTrue(channel.writeInbound(Unpooled.copiedBuffer(requestStr, CharsetUtil.US_ASCII)));
         HttpRequest request = channel.readInbound();
         assertFalse(request.decoderResult().isFailure());
+        assertTrue(request.headers().names().contains("Transfer-Encoding"));
         assertTrue(request.headers().contains("Transfer-Encoding", "chunked", false));
         assertFalse(request.headers().contains("Content-Length"));
         LastHttpContent c = channel.readInbound();
         c.release();
         assertFalse(channel.finish());
+    }
+
+    @Test
+    public void testOrderOfHeadersWithContentLength() {
+        String requestStr = "GET /some/path HTTP/1.1\r\n" +
+                "Host: example.com\r\n" +
+                "Content-Length: 5\r\n" +
+                "Connection: close\r\n\r\n" +
+                "hello";
+        EmbeddedChannel channel = new EmbeddedChannel(new HttpRequestDecoder());
+        assertTrue(channel.writeInbound(Unpooled.copiedBuffer(requestStr, CharsetUtil.US_ASCII)));
+        HttpRequest request = channel.readInbound();
+        List<String> headers = new ArrayList<String>();
+        for (Map.Entry<String, String> header : request.headers()) {
+            headers.add(header.getKey());
+        }
+        assertEquals(Arrays.asList("Host", "Content-Length", "Connection"), headers, "ordered headers");
     }
 
     @Test

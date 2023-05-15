@@ -56,6 +56,7 @@ import io.netty.util.concurrent.EventExecutor;
 import io.netty.util.concurrent.FastThreadLocal;
 import io.netty.util.concurrent.Future;
 import io.netty.util.concurrent.FutureListener;
+import io.netty.util.concurrent.GenericFutureListener;
 import io.netty.util.concurrent.Promise;
 import io.netty.util.internal.EmptyArrays;
 import io.netty.util.internal.PlatformDependent;
@@ -71,14 +72,15 @@ import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.NetworkInterface;
 import java.net.SocketAddress;
-import java.net.SocketException;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.Enumeration;
+import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.TimeUnit;
 
 import static io.netty.resolver.dns.DefaultDnsServerAddressStreamProvider.DNS_PORT;
@@ -165,22 +167,15 @@ public class DnsNameResolver extends InetNameResolver {
      * Returns {@code true} if any {@link NetworkInterface} supports {@code IPv6}, {@code false} otherwise.
      */
     private static boolean anyInterfaceSupportsIpV6() {
-        try {
-            Enumeration<NetworkInterface> interfaces = NetworkInterface.getNetworkInterfaces();
-            while (interfaces.hasMoreElements()) {
-                NetworkInterface iface = interfaces.nextElement();
-                Enumeration<InetAddress> addresses = iface.getInetAddresses();
-                while (addresses.hasMoreElements()) {
-                    InetAddress inetAddress = addresses.nextElement();
-                    if (inetAddress instanceof Inet6Address && !inetAddress.isAnyLocalAddress() &&
+        for (NetworkInterface iface : NetUtil.NETWORK_INTERFACES) {
+            Enumeration<InetAddress> addresses = iface.getInetAddresses();
+            while (addresses.hasMoreElements()) {
+                InetAddress inetAddress = addresses.nextElement();
+                if (inetAddress instanceof Inet6Address && !inetAddress.isAnyLocalAddress() &&
                         !inetAddress.isLoopbackAddress() && !inetAddress.isLinkLocalAddress()) {
-                        return true;
-                    }
+                    return true;
                 }
             }
-        } catch (SocketException e) {
-            logger.debug("Unable to detect if any interface supports IPv6, assuming IPv4-only", e);
-            // ignore
         }
         return false;
     }
@@ -268,6 +263,9 @@ public class DnsNameResolver extends InetNameResolver {
     private final DnsQueryLifecycleObserverFactory dnsQueryLifecycleObserverFactory;
     private final boolean completeOncePreferredResolved;
     private final ChannelFactory<? extends SocketChannel> socketChannelFactory;
+
+    private final int maxNumConsolidation;
+    private final Map<String, Future<List<InetAddress>>> inflightLookups;
 
     /**
      * Creates a new DNS-based name resolver that communicates with the specified list of DNS servers.
@@ -397,7 +395,7 @@ public class DnsNameResolver extends InetNameResolver {
                 null, dnsQueryLifecycleObserverFactory, queryTimeoutMillis, resolvedAddressTypes,
                 recursionDesired, maxQueriesPerResolve, traceEnabled, maxPayloadSize, optResourceEnabled,
                 hostsFileEntriesResolver, dnsServerAddressStreamProvider, searchDomains, ndots, decodeIdn,
-                completeOncePreferredResolved);
+                completeOncePreferredResolved, 0);
     }
 
     DnsNameResolver(
@@ -421,7 +419,8 @@ public class DnsNameResolver extends InetNameResolver {
             String[] searchDomains,
             int ndots,
             boolean decodeIdn,
-            boolean completeOncePreferredResolved) {
+            boolean completeOncePreferredResolved,
+            int maxNumConsolidation) {
         super(eventLoop);
         this.queryTimeoutMillis = queryTimeoutMillis > 0
             ? queryTimeoutMillis
@@ -478,6 +477,12 @@ public class DnsNameResolver extends InetNameResolver {
         preferredAddressType = preferredAddressType(this.resolvedAddressTypes);
         this.authoritativeDnsServerCache = checkNotNull(authoritativeDnsServerCache, "authoritativeDnsServerCache");
         nameServerComparator = new NameServerComparator(preferredAddressType.addressType());
+        this.maxNumConsolidation = maxNumConsolidation;
+        if (maxNumConsolidation > 0) {
+            inflightLookups = new HashMap<String, Future<List<InetAddress>>>();
+        } else {
+            inflightLookups = null;
+        }
 
         Bootstrap b = new Bootstrap();
         b.group(executor());
@@ -972,7 +977,7 @@ public class DnsNameResolver extends InetNameResolver {
         }
 
         if (!doResolveCached(hostname, additionals, promise, resolveCache)) {
-            doResolveUncached(hostname, additionals, promise, resolveCache, true);
+            doResolveUncached(hostname, additionals, promise, resolveCache, completeOncePreferredResolved);
         }
     }
 
@@ -1030,7 +1035,7 @@ public class DnsNameResolver extends InetNameResolver {
                                    final Promise<InetAddress> promise,
                                    DnsCache resolveCache, boolean completeEarlyIfPossible) {
         final Promise<List<InetAddress>> allPromise = executor().newPromise();
-        doResolveAllUncached(hostname, additionals, promise, allPromise, resolveCache, true);
+        doResolveAllUncached(hostname, additionals, promise, allPromise, resolveCache, completeEarlyIfPossible);
         allPromise.addListener(new FutureListener<List<InetAddress>>() {
             @Override
             public void operationComplete(Future<List<InetAddress>> future) {
@@ -1141,21 +1146,66 @@ public class DnsNameResolver extends InetNameResolver {
         }
     }
 
-    private void doResolveAllUncached0(String hostname,
-                                       DnsRecord[] additionals,
-                                       Promise<?> originalPromise,
-                                       Promise<List<InetAddress>> promise,
-                                       DnsCache resolveCache,
-                                       boolean completeEarlyIfPossible) {
+    private void doResolveAllUncached0(final String hostname,
+                                       final DnsRecord[] additionals,
+                                       final Promise<?> originalPromise,
+                                       final Promise<List<InetAddress>> promise,
+                                       final DnsCache resolveCache,
+                                       final boolean completeEarlyIfPossible) {
 
         assert executor().inEventLoop();
 
+        if (inflightLookups != null && (additionals == null || additionals.length == 0)) {
+            Future<List<InetAddress>> inflightFuture = inflightLookups.get(hostname);
+            if (inflightFuture != null) {
+                inflightFuture.addListener(new GenericFutureListener<Future<? super List<InetAddress>>>() {
+                    @SuppressWarnings("unchecked")
+                    @Override
+                    public void operationComplete(Future<? super List<InetAddress>> future) {
+                        if (future.isSuccess()) {
+                            promise.setSuccess((List<InetAddress>) future.getNow());
+                        } else {
+                            Throwable cause = future.cause();
+                            if (isTimeoutError(cause)) {
+                                // The failure was caused by a timeout. This might be happening as a result of
+                                // the remote server be overloaded for some short amount of time or because
+                                // UDP packets were dropped on the floor. In this case lets try to just do the
+                                // query explicit and don't cascade this possible temporary failure.
+                                resolveNow(hostname, additionals, originalPromise, promise,
+                                        resolveCache, completeEarlyIfPossible);
+                            } else {
+                                promise.setFailure(cause);
+                            }
+                        }
+                    }
+                });
+                return;
+            // Check if we have space left in the map.
+            } else if (inflightLookups.size() < maxNumConsolidation) {
+                inflightLookups.put(hostname, promise);
+                promise.addListener(new GenericFutureListener<Future<? super List<InetAddress>>>() {
+                    @Override
+                    public void operationComplete(Future<? super List<InetAddress>> future) {
+                        inflightLookups.remove(hostname);
+                    }
+                });
+            }
+        }
+        resolveNow(hostname, additionals, originalPromise, promise, resolveCache, completeEarlyIfPossible);
+    }
+
+    private void resolveNow(final String hostname,
+                            final DnsRecord[] additionals,
+                            final Promise<?> originalPromise,
+                            final Promise<List<InetAddress>> promise,
+                            final DnsCache resolveCache,
+                            final boolean completeEarlyIfPossible) {
         final DnsServerAddressStream nameServerAddrs =
                 dnsServerAddressStreamProvider.nameServerAddressStream(hostname);
-        new DnsAddressResolveContext(this, originalPromise, hostname, additionals, nameServerAddrs,
-                                     maxQueriesPerResolve, resolveCache,
-                                     authoritativeDnsServerCache, completeEarlyIfPossible)
-                .resolve(promise);
+        DnsAddressResolveContext ctx = new DnsAddressResolveContext(this, originalPromise, hostname, additionals,
+                nameServerAddrs, maxQueriesPerResolve, resolveCache,
+                authoritativeDnsServerCache, completeEarlyIfPossible);
+        ctx.resolve(promise);
     }
 
     private static String hostname(String inetHost) {

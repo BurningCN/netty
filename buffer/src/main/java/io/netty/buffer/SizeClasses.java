@@ -116,7 +116,7 @@ abstract class SizeClasses implements SizeClassesMetric {
     private final int[] size2idxTab;
 
     protected SizeClasses(int pageSize, int pageShifts, int chunkSize, int directMemoryCacheAlignment) {
-        int group = log2(chunkSize) + 1 - LOG2_QUANTUM;
+        int group = log2(chunkSize) - LOG2_QUANTUM - LOG2_SIZE_CLASS_GROUP + 1;
 
         //generate size classes
         //[index, log2Group, log2Delta, nDelta, isMultiPageSize, isSubPage, log2DeltaLookup]
@@ -338,9 +338,7 @@ abstract class SizeClasses implements SizeClassesMetric {
         int log2Delta = x < LOG2_SIZE_CLASS_GROUP + LOG2_QUANTUM + 1
                 ? LOG2_QUANTUM : x - LOG2_SIZE_CLASS_GROUP - 1;
 
-        int deltaInverseMask = -1 << log2Delta;
-        int mod = (size - 1 & deltaInverseMask) >> log2Delta &
-                  (1 << LOG2_SIZE_CLASS_GROUP) - 1;
+        int mod = size - 1 >> log2Delta & (1 << LOG2_SIZE_CLASS_GROUP) - 1;
 
         return group + mod;
     }
@@ -371,9 +369,7 @@ abstract class SizeClasses implements SizeClassesMetric {
         int log2Delta = x < LOG2_SIZE_CLASS_GROUP + pageShifts + 1?
                 pageShifts : x - LOG2_SIZE_CLASS_GROUP - 1;
 
-        int deltaInverseMask = -1 << log2Delta;
-        int mod = (pageSize - 1 & deltaInverseMask) >> log2Delta &
-                  (1 << LOG2_SIZE_CLASS_GROUP) - 1;
+        int mod = pageSize - 1 >> log2Delta & (1 << LOG2_SIZE_CLASS_GROUP) - 1;
 
         int pageIdx = group + mod;
 
