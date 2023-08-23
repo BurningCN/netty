@@ -26,7 +26,7 @@
   <groupId>io.netty</groupId>
   <artifactId>netty-parent</artifactId>
   <packaging>pom</packaging>
-  <version>4.1.93.Final-SNAPSHOT</version>
+  <version>4.1.98.Final-SNAPSHOT</version>
 
   <name>Netty</name>
   <url>https://netty.io/</url>
@@ -427,7 +427,7 @@
         <argLine.alpnAgent />
         <forbiddenapis.skip>true</forbiddenapis.skip>
         <!-- Needed because of https://issues.apache.org/jira/browse/MENFORCER-275 -->
-        <enforcer.plugin.version>3.3.0</enforcer.plugin.version>
+        <enforcer.plugin.version>3.0.0-M3</enforcer.plugin.version>
         <!-- 1.4.x does not work in Java10+ -->
         <jboss.marshalling.version>2.0.5.Final</jboss.marshalling.version>
       </properties>
@@ -445,7 +445,7 @@
         <!-- Skip as maven plugin not works with Java9 yet -->
         <forbiddenapis.skip>true</forbiddenapis.skip>
         <!-- Needed because of https://issues.apache.org/jira/browse/MENFORCER-275 -->
-        <enforcer.plugin.version>3.3.0</enforcer.plugin.version>
+        <enforcer.plugin.version>3.0.0-M1</enforcer.plugin.version>
       </properties>
       <activation>
         <jdk>9</jdk>
@@ -632,7 +632,7 @@
     <logging.config>${project.basedir}/../common/src/test/resources/logback-test.xml</logging.config>
     <logging.logLevel>debug</logging.logLevel>
     <log4j2.version>2.17.2</log4j2.version>
-    <enforcer.plugin.version>3.3.0</enforcer.plugin.version>
+    <enforcer.plugin.version>3.0.0</enforcer.plugin.version>
     <junit.version>5.9.0</junit.version>
     <skipTests>false</skipTests>
     <testJavaHome>${java.home}</testJavaHome>
@@ -641,7 +641,7 @@
     <skipAutobahnTestsuite>false</skipAutobahnTestsuite>
     <skipHttp2Testsuite>false</skipHttp2Testsuite>
     <graalvm.version>19.3.6</graalvm.version>
-    <brotli4j.version>1.11.0</brotli4j.version>
+    <brotli4j.version>1.12.0</brotli4j.version>
     <!-- By default skip native testsuite as it requires a custom environment with graalvm installed -->
     <skipNativeImageTestsuite>true</skipNativeImageTestsuite>
     <skipShadingTestsuite>false</skipShadingTestsuite>
@@ -702,7 +702,7 @@
       <dependency>
         <groupId>io.netty</groupId>
         <artifactId>netty-jni-util</artifactId>
-        <version>0.0.6.Final</version>
+        <version>0.0.7.Final</version>
         <classifier>sources</classifier>
         <optional>true</optional>
       </dependency>
@@ -1329,7 +1329,7 @@
         <version>${enforcer.plugin.version}</version>
         <executions>
           <execution>
-            <id>enforce-versions</id>
+            <id>enforce-tools</id>
             <goals>
               <goal>enforce</goal>
             </goals>

@@ -230,6 +230,7 @@ abstract class PoolArena<T> extends SizeClasses implements PoolArenaMetric {
     }
 
     void free(PoolChunk<T> chunk, ByteBuffer nioBuffer, long handle, int normCapacity, PoolThreadCache cache) {
+        chunk.decrementPinnedMemory(normCapacity);
         if (chunk.unpooled) {
             int size = chunk.chunkSize();
             destroyChunk(chunk);
@@ -283,23 +284,44 @@ abstract class PoolArena<T> extends SizeClasses implements PoolArenaMetric {
         return smallSubpagePools[sizeIdx];
     }
 
-    void reallocate(PooledByteBuf<T> buf, int newCapacity, boolean freeOldMemory) {
+    void reallocate(PooledByteBuf<T> buf, int newCapacity) {
         assert newCapacity >= 0 && newCapacity <= buf.maxCapacity();
 
-        int oldCapacity = buf.length;
-        if (oldCapacity == newCapacity) {
-            return;
+        final int oldCapacity;
+        final PoolChunk<T> oldChunk;
+        final ByteBuffer oldNioBuffer;
+        final long oldHandle;
+        final T oldMemory;
+        final int oldOffset;
+        final int oldMaxLength;
+        final PoolThreadCache oldCache;
+
+        // We synchronize on the ByteBuf itself to ensure there is no "concurrent" reallocations for the same buffer.
+        // We do this to ensure the ByteBuf internal fields that are used to allocate / free are not accessed
+        // concurrently. This is important as otherwise we might end up corrupting our internal state of our data
+        // structures.
+        //
+        // Also note we don't use a Lock here but just synchronized even tho this might seem like a bad choice for Loom.
+        // This is done to minimize the overhead per ByteBuf. The time this would block another thread should be
+        // relative small and so not be a problem for Loom.
+        // See https://github.com/netty/netty/issues/13467
+        synchronized (buf) {
+            oldCapacity = buf.length;
+            if (oldCapacity == newCapacity) {
+                return;
+            }
+
+            oldChunk = buf.chunk;
+            oldNioBuffer = buf.tmpNioBuf;
+            oldHandle = buf.handle;
+            oldMemory = buf.memory;
+            oldOffset = buf.offset;
+            oldMaxLength = buf.maxLength;
+            oldCache = buf.cache;
+
+            // This does not touch buf's reader/writer indices
+            allocate(parent.threadCache(), buf, newCapacity);
         }
-
-        PoolChunk<T> oldChunk = buf.chunk;
-        ByteBuffer oldNioBuffer = buf.tmpNioBuf;
-        long oldHandle = buf.handle;
-        T oldMemory = buf.memory;
-        int oldOffset = buf.offset;
-        int oldMaxLength = buf.maxLength;
-
-        // This does not touch buf's reader/writer indices
-        allocate(parent.threadCache(), buf, newCapacity);
         int bytesToCopy;
         if (newCapacity > oldCapacity) {
             bytesToCopy = oldCapacity;
@@ -308,9 +330,7 @@ abstract class PoolArena<T> extends SizeClasses implements PoolArenaMetric {
             bytesToCopy = newCapacity;
         }
         memoryCopy(oldMemory, oldOffset, buf, bytesToCopy);
-        if (freeOldMemory) {
-            free(oldChunk, oldNioBuffer, oldHandle, oldMaxLength, buf.cache);
-        }
+        free(oldChunk, oldNioBuffer, oldHandle, oldMaxLength, oldCache);
     }
 
     @Override
@@ -567,7 +587,7 @@ abstract class PoolArena<T> extends SizeClasses implements PoolArenaMetric {
     private static void appendPoolSubPages(StringBuilder buf, PoolSubpage<?>[] subpages) {
         for (int i = 0; i < subpages.length; i ++) {
             PoolSubpage<?> head = subpages[i];
-            if (head.next == head) {
+            if (head.next == head || head.next == null) {
                 continue;
             }
 
@@ -575,7 +595,7 @@ abstract class PoolArena<T> extends SizeClasses implements PoolArenaMetric {
                     .append(i)
                     .append(": ");
             PoolSubpage<?> s = head.next;
-            for (;;) {
+            while (s != null) {
                 buf.append(s);
                 s = s.next;
                 if (s == head) {
